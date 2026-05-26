@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Visualizador Sequencial de WhatsApp (iOS) com Mídias</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/ogg-opus-decoder@0.4.0/dist/index.umd.min.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #efeae2; margin: 0; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; background: #fff; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        h1 { color: #075e54; text-align: center; margin-bottom: 5px; }
+        .subtitle { text-align: center; color: #666; margin-bottom: 25px; font-size: 14px; }
+        .file-inputs-container { display: flex; gap: 15px; margin-bottom: 20px; }
+        .file-input-wrapper { flex: 1; text-align: center; padding: 20px; border: 2px dashed #075e54; border-radius: 5px; background: #fcfcfc; }
+        .file-input-wrapper.loaded { border-color: #25d366; background: #f0fdf4; }
+        .chat-box { display: flex; flex-direction: column; gap: 10px; margin-top: 20px; padding: 10px; max-height: 600px; overflow-y: auto; background: #e5ddd5; border-radius: 5px; }
+        .msg { max-width: 65%; padding: 10px 14px; border-radius: 10px; font-size: 15px; position: relative; line-height: 1.4; box-shadow: 0 1px 1px rgba(0,0,0,0.1); display: flex; flex-direction: column; }
+        .enviada { background-color: #d9fdd3; align-self: flex-end; border-top-right-radius: 0; }
+        .recebida { background-color: #ffffff; align-self: flex-start; border-top-left-radius: 0; }
+        .meta { font-size: 11px; color: #667781; text-align: right; margin-top: 6px; display: block; width: 100%; }
+        .chat-id { font-size: 12px; color: #35a494; font-weight: bold; margin-bottom: 4px; display: block; word-break: break-all; }
+        .controls { display: flex; justify-content: space-between; align-items: center; margin-top: 15px; flex-wrap: wrap; gap: 10px; }
+        button { background-color: #008069; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; }
+        button:disabled { background-color: #cccccc; cursor: not-allowed; }
+        .btn-back { background-color: #34495e; }
+        select { padding: 6px; font-size: 14px; border-radius: 4px; max-width: 350px; }
+        .media-content { margin-top: 5px; max-width: 100%; border-radius: 5px; }
+        img.media-content { max-height: 250px; object-fit: contain; border: 1px solid #ddd; background-color: #f7f7f7; display: block; }
+        audio.media-content { width: 250px; height: 40px; display: block; margin-top: 5px; }
+        .audio-loading { font-size: 12px; color: #666; font-style: italic; margin-top: 4px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Visualizador Sequencial de WhatsApp (iOS)</h1>
+    <div class="subtitle">Banco de Dados SQLite & Arquivos de Mídia</div>
+    
+    <div class="file-inputs-container" id="upload-section">
+        <div class="file-input-wrapper" id="db-dropzone">
+            <strong>Passo 1: Banco de Dados</strong>
+            <p style="font-size:12px; color:#555;">Selecione o arquivo <strong>ChatStorage_anon.sqlite</strong></p>
+            <input type="file" id="dbfile" accept=".db,.sqlite,.sqlitedb">
+        </div>
+        
+        <div class="file-input-wrapper" id="media-dropzone">
+            <strong>Passo 2: Pasta de Mídias (Opcional)</strong>
+            <p style="font-size:12px; color:#555;">Selecione/arraste a pasta contendo as fotos e áudios</p>
+            <input type="file" id="mediafolder" webkitdirectory directory multiple>
+        </div>
+    </div>
+
+    <div id="app-content" style="display:none;">
+        <div class="controls">
+            <div>
+                <button id="back-init-btn" class="btn-back">⬅ Voltar ao Início</button>
+            </div>
+            <div>
+                <label for="chat-select">Filtrar por Contato: </label>
+                <select id="chat-select"><option value="ALL">Todas as conversas (Sequencial Geral)</option></select>
+            </div>
+            <div>
+                <button id="prev-btn" disabled>Anterior</button>
+                <span id="page-info">Página 1</span>
+                <button id="next-btn" disabled>Próxima</button>
+            </div>
+        </div>
+
+        <div class="chat-box" id="chat-container"></div>
+    </div>
+</div>
+
+<script>
+    let dbInstance = null;
+    let SQL = null;
+    let currentPage = 1;
+    const recordsPerPage = 200;
+    let currentChat = "ALL";
+    
+    // Armazena as referências dos arquivos locais
+    const mediaMap = {}; 
+
+    // Inicializa a engine do SQLite via WebAssembly
+    initSqlJs({ locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/${file}` }).then(function(sql){
+        SQL = sql;
+    });
+
+    // Manipulador de upload do Banco de Dados
+    document.getElementById('dbfile').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function() {
+            const Ubytes = new Uint8Array(reader.result);
+            try {
+                dbInstance = new SQL.Database(Ubytes);
+                document.getElementById('db-dropzone').classList.add('loaded');
+                verificarProntidao();
+            } catch (err) {
+                alert("Erro ao ler a estrutura do banco de dados SQLite: " + err.message);
+            }
+        };
+        reader.readAsArrayBuffer(file);
+    });
+
+    // Manipulador de upload da pasta de mídias estruturada
+    document.getElementById('mediafolder').addEventListener('change', function(e) {
+        const files = e.target.files;
+        if (!files || files.length === 0) return;
+
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            const nomeArquivo = file.name.toLowerCase();
+            mediaMap[nomeArquivo] = file; 
+        }
+        
+        document.getElementById('media-dropzone').classList.add('loaded');
+        if (dbInstance) {
+            renderizarMensagens();
+        }
+    });
+
+    function verificarProntidao() {
+        if (dbInstance) {
+            document.getElementById('upload-section').style.display = 'none';
+            document.getElementById('app-content').style.display = 'block';
+            carregarFiltros();
+            renderizarMensagens();
+        }
+    }
+
+    function carregarFiltros() {
+        const select = document.getElementById('chat-select');
+        select.innerHTML = '<option value="ALL">Todas as conversas (Sequencial Geral)</option>';
+        try {
+            const query = `
+                SELECT DISTINCT c.ZCONTACTJID, m.ZCHATSESSION, c.ZPARTNERNAME 
+                FROM ZWAMESSAGE m
+                JOIN ZWACHATSESSION c ON m.ZCHATSESSION = c.Z_PK 
+                WHERE c.ZCONTACTJID IS NOT NULL 
+                ORDER BY COALESCE(c.ZPARTNERNAME, c.ZCONTACTJID) ASC
+            `;
+            const res = dbInstance.exec(query);
+            if(res.length > 0) {
+                res[0].values.forEach(row => {
+                    const jid = row[0];
+                    const sessionId = row[1];
+                    const nomeContato = row[2];
+                    
+                    const opt = document.createElement('option');
+                    opt.value = sessionId;
+                    opt.textContent = (nomeContato && nomeContato.trim() !== "") ? nomeContato : jid;
+                    select.appendChild(opt);
+                });
+            }
+        } catch(e) {
+            console.log("Erro ao carregar filtros de chat: " + e.message);
+        }
+    }
+
+    // Função para buscar o arquivo contendo partes ou o hash correspondente
+    function encontrarArquivoDeMidia(caminhoOriginal) {
+        if (!caminhoOriginal) return null;
+        
+        // Converte para minúsculo e limpa caminhos de diretório
+        let stringBusca = caminhoOriginal.toLowerCase();
+        let partes = stringBusca.split('/');
+        let nomeLimpo = partes[partes.length - 1];
+
+        // 1. Tenta correspondência exata pelo nome do arquivo extraído
+        if (mediaMap[nomeLimpo]) {
+            return mediaMap[nomeLimpo];
+        }
+
+        // 2. Busca por aproximação (caso o nome tenha extensões ocultas ou caminhos truncados)
+        for (let chave in mediaMap) {
+            if (nomeLimpo.includes(chave) || chave.includes(nomeLimpo)) {
+                return mediaMap[chave];
+            }
+        }
+        return null;
+    }
+
+    async function carregarAudioOpus(fileObject, audioElement, statusElement) {
+        try {
+            const decoder = new oggOpusDecoder.OggOpusDecoder();
+            await decoder.ready;
+
+            const arrayBuffer = await fileObject.arrayBuffer();
+            const u8Array = new Uint8Array(arrayBuffer);
+            
+            const decoded = decoder.decodeFile(u8Array);
+            const wavBlob = waveformBlob(decoded.channelData, decoded.sampleRate);
+            const blobUrl = URL.createObjectURL(wavBlob);
+            
+            audioElement.src = blobUrl;
+            statusElement.style.display = "none"; 
+            audioElement.style.display = "block"; 
+        } catch (err) {
+            console.error("Erro ao decodificar áudio OPUS: ", err);
+            statusElement.textContent = "❌ Erro ao reproduzir este áudio.";
+        }
+    }
+
+    function waveformBlob(channelData, sampleRate) {
+        const numChannels = channelData.length;
+        const length = channelData[0].length * numChannels * 2;
+        const buffer = new ArrayBuffer(44 + length);
+        const view = new DataView(buffer);
+        
+        view.setUint32(0, 0x52494646, false); 
+        view.setUint32(4, 36 + length, true);
+        view.setUint32(8, 0x57415645, false); 
+        view.setUint32(12, 0x666d7420, false); 
+        view.setUint32(16, 16, true); 
+        view.setUint16(20, 1, true); 
+        view.setUint16(22, numChannels, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * numChannels * 2, true);
+        view.setUint16(32, numChannels * 2, true);
+        view.setUint16(34, 16, true); 
+        view.setUint32(36, 0x64617461, false); 
+        view.setUint32(40, length, true);
+        
+        let offset = 44;
+        for (let i = 0; i < channelData[0].length; i++) {
+            for (let channel = 0; channel < numChannels; channel++) {
+                let sample = channelData[channel][i] * 32768;
+                sample = Math.max(-32768, Math.min(32767, sample));
+                view.setInt16(offset, sample, true);
+                offset += 2;
+            }
+        }
+        return new Blob([buffer], { type: 'audio/wav' });
+    }
+
+    function renderizarMensagens() {
+        const container = document.getElementById('chat-container');
+        container.innerHTML = "";
+        
+        let query = "";
+        let offset = (currentPage - 1) * recordsPerPage;
+
+        const baseQuery = `
+            SELECT 
+                c.ZCONTACTJID, 
+                m.ZTOJID, 
+                m.ZMESSAGEDATE, 
+                m.ZTEXT, 
+                media.ZMEDIALOCALPATH,
+                c.ZPARTNERNAME
+            FROM ZWAMESSAGE m
+            JOIN ZWACHATSESSION c ON m.ZCHATSESSION = c.Z_PK
+            LEFT JOIN ZWAMEDIAITEM media ON m.ZMEDIAITEM = media.Z_PK
+        `;
+
+        if (currentChat === "ALL") {
+            query = `${baseQuery} ORDER BY m.ZMESSAGEDATE ASC LIMIT ${recordsPerPage} OFFSET ${offset}`;
+        } else {
+            query = `${baseQuery} WHERE m.ZCHATSESSION = ${currentChat} ORDER BY m.ZMESSAGEDATE ASC LIMIT ${recordsPerPage} OFFSET ${offset}`;
+        }
+
+        try {
+            const res = dbInstance.exec(query);
+            if (res.length > 0) {
+                const rows = res[0].values;
+                rows.forEach(row => {
+                    const contatoJid = row[0];
+                    const paraJid = row[1]; 
+                    const coreDataTimestamp = row[2];
+                    const texto = row[3];
+                    const caminhoMedia = row[4];
+                    const nomeContato = row[5];
+                    
+                    if (!texto && !caminhoMedia) return;
+
+                    const deMim = (paraJid !== null && paraJid !== "") ? 1 : 0;
+                    const dataUnix = (coreDataTimestamp + 978307200) * 1000;
+                    const dataFormatada = new Date(dataUnix).toLocaleString('pt-BR');
+                    
+                    const msgDiv = document.createElement('div');
+                    msgDiv.className = `msg ${deMim == 1 ? 'enviada' : 'recebida'}`;
+                    
+                    let htmlConteudo = "";
+                    if (currentChat === "ALL") {
+                        const identificadorExibicao = (nomeContato && nomeContato.trim() !== "") ? nomeContato : contatoJid;
+                        htmlConteudo += `<span class="chat-id">${identificadorExibicao}</span>`;
+                    }
+                    
+                    if (texto) {
+                        htmlConteudo += `<span>${escaparHtml(texto)}</span>`;
+                    }
+                    
+                    if (caminhoMedia) {
+                        // CORREÇÃO: Utiliza o localizador robusto inteligente de mídias
+                        const fileObject = encontrarArquivoDeMidia(caminhoMedia);
+                        const nomeExibicaoArquivo = caminhoMedia.split('/').pop();
+                        
+                        if (fileObject) {
+                            const nomeMinusculo = fileObject.name.toLowerCase();
+                            
+                            // Validação e renderização de Imagens
+                            if (nomeMinusculo.endsWith('.jpg') || nomeMinusculo.endsWith('.jpeg') || nomeMinusculo.endsWith('.png') || nomeMinusculo.endsWith('.webp')) {
+                                const imgUrl = URL.createObjectURL(fileObject);
+                                htmlConteudo += `<img class="media-content" src="${imgUrl}" alt="Imagem carregada">`;
+                            } 
+                            // Validação e renderização de Áudios/Mensagens de voz
+                            else if (nomeMinusculo.endsWith('.opus') || nomeMinusculo.endsWith('.aac') || nomeMinusculo.endsWith('.m4a') || nomeMinusculo.endsWith('.mp3')) {
+                                if (nomeMinusculo.endsWith('.opus')) {
+                                    const uniqueId = "audio_" + Math.random().toString(36).substr(2, 9);
+                                    htmlConteudo += `
+                                        <div class="audio-loading" id="status_${uniqueId}">🔄 Otimizando áudio do WhatsApp...</div>
+                                        <audio class="media-content" id="${uniqueId}" controls style="display:none;"></audio>
+                                    `;
+                                    setTimeout(() => {
+                                        const audEl = document.getElementById(uniqueId);
+                                        const stEl = document.getElementById(`status_${uniqueId}`);
+                                        if(audEl && stEl) carregarAudioOpus(fileObject, audEl, stEl);
+                                    }, 10);
+                                } else {
+                                    const audioUrl = URL.createObjectURL(fileObject);
+                                    htmlConteudo += `<audio class="media-content" controls src="${audioUrl}"></audio>`;
+                                }
+                            } else {
+                                htmlConteudo += `<div style="font-size:12px; margin-top:5px; color:#555;">📁 Arquivo: <strong>${nomeExibicaoArquivo}</strong></div>`;
+                            }
+                        } else {
+                            // Fallback caso o arquivo em questão realmente falte na pasta carregada
+                            htmlConteudo += `<div style="font-size:11px; margin-top:5px; color:#c97f16; font-style:italic;">📸 [Mídia Anexada: ${nomeExibicaoArquivo}]</div>`;
+                        }
+                    }
+                    
+                    htmlConteudo += `<span class="meta">${dataFormatada}</span>`;
+                    msgDiv.innerHTML = htmlConteudo;
+                    container.appendChild(msgDiv);
+                });
+
+                document.getElementById('page-info').textContent = `Página ${currentPage}`;
+                document.getElementById('prev-btn').disabled = currentPage === 1;
+                document.getElementById('next-btn').disabled = rows.length < recordsPerPage;
+                container.scrollTop = 0;
+            } else {
+                container.innerHTML = "<p style='text-align:center;color:#666;'>Fim dos registros desta seção.</p>";
+                document.getElementById('next-btn').disabled = true;
+            }
+        } catch (err) {
+            container.innerHTML = "<p style='text-align:center;color:red;'>Erro na execução da query: " + err.message + "</p>";
+        }
+    }
+
+    function escaparHtml(text) {
+        if (!text) return "";
+        return text.toString().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+    }
+
+    document.getElementById('back-init-btn').addEventListener('click', function() {
+        currentPage = 1;
+        currentChat = "ALL";
+        dbInstance = null;
+        
+        document.getElementById('dbfile').value = "";
+        document.getElementById('mediafolder').value = "";
+        
+        document.getElementById('db-dropzone').classList.remove('loaded');
+        document.getElementById('media-dropzone').classList.remove('loaded');
+        
+        document.getElementById('app-content').style.display = 'none';
+        document.getElementById('upload-section').style.display = 'flex';
+    });
+
+    document.getElementById('chat-select').addEventListener('change', function(e) {
+        currentChat = e.target.value;
+        currentPage = 1;
+        renderizarMensagens();
+    });
+
+    document.getElementById('prev-btn').addEventListener('click', function() {
+        if (currentPage > 1) {
+            currentPage--;
+            renderizarMensagens();
+        }
+    });
+
+    document.getElementById('next-btn').addEventListener('click', function() {
+        currentPage++;
+        renderizarMensagens();
+    });
+</script>
+
+</body>
+</html>
