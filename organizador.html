@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <title>Visualizador Sequencial de WhatsApp (iOS) com Mídias</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/ogg-opus-decoder@0.4.0/dist/index.umd.min.js"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #efeae2; margin: 0; padding: 20px; }
         .container { max-width: 900px; margin: 0 auto; background: #fff; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
@@ -25,9 +24,8 @@
         .btn-back { background-color: #34495e; }
         select { padding: 6px; font-size: 14px; border-radius: 4px; max-width: 350px; }
         .media-content { margin-top: 5px; max-width: 100%; border-radius: 5px; }
-        img.media-content { max-height: 250px; object-fit: contain; border: 1px solid #ddd; background-color: #f7f7f7; display: block; }
-        audio.media-content { width: 250px; height: 40px; display: block; margin-top: 5px; }
-        .audio-loading { font-size: 12px; color: #666; font-style: italic; margin-top: 4px; }
+        img.media-content { max-height: 250px; object-fit: contain; border: 1px solid #ddd; background-color: #f7f7f7; }
+        audio.media-content { width: 250px; height: 40px; }
     </style>
 </head>
 <body>
@@ -77,8 +75,7 @@
     const recordsPerPage = 200;
     let currentChat = "ALL";
     
-    // Armazena as referências dos arquivos locais
-    const mediaMap = {}; 
+    const mediaMap = {};
 
     // Inicializa a engine do SQLite via WebAssembly
     initSqlJs({ locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/${file}` }).then(function(sql){
@@ -111,8 +108,8 @@
 
         for (let i = 0; i < files.length; i++) {
             const file = files[i];
-            const nomeArquivo = file.name.toLowerCase();
-            mediaMap[nomeArquivo] = file; 
+            const nomeArquivo = file.name;
+            mediaMap[nomeArquivo.toLowerCase()] = URL.createObjectURL(file);
         }
         
         document.getElementById('media-dropzone').classList.add('loaded');
@@ -134,6 +131,7 @@
         const select = document.getElementById('chat-select');
         select.innerHTML = '<option value="ALL">Todas as conversas (Sequencial Geral)</option>';
         try {
+            // AJUSTE: Buscando ZPARTNERNAME (nome do contato) na query de filtros
             const query = `
                 SELECT DISTINCT c.ZCONTACTJID, m.ZCHATSESSION, c.ZPARTNERNAME 
                 FROM ZWAMESSAGE m
@@ -150,6 +148,7 @@
                     
                     const opt = document.createElement('option');
                     opt.value = sessionId;
+                    // Se houver um nome válido preenchido, usa o nome, senão mantém o número/JID
                     opt.textContent = (nomeContato && nomeContato.trim() !== "") ? nomeContato : jid;
                     select.appendChild(opt);
                 });
@@ -159,82 +158,6 @@
         }
     }
 
-    // Função para buscar o arquivo contendo partes ou o hash correspondente
-    function encontrarArquivoDeMidia(caminhoOriginal) {
-        if (!caminhoOriginal) return null;
-        
-        // Converte para minúsculo e limpa caminhos de diretório
-        let stringBusca = caminhoOriginal.toLowerCase();
-        let partes = stringBusca.split('/');
-        let nomeLimpo = partes[partes.length - 1];
-
-        // 1. Tenta correspondência exata pelo nome do arquivo extraído
-        if (mediaMap[nomeLimpo]) {
-            return mediaMap[nomeLimpo];
-        }
-
-        // 2. Busca por aproximação (caso o nome tenha extensões ocultas ou caminhos truncados)
-        for (let chave in mediaMap) {
-            if (nomeLimpo.includes(chave) || chave.includes(nomeLimpo)) {
-                return mediaMap[chave];
-            }
-        }
-        return null;
-    }
-
-    async function carregarAudioOpus(fileObject, audioElement, statusElement) {
-        try {
-            const decoder = new oggOpusDecoder.OggOpusDecoder();
-            await decoder.ready;
-
-            const arrayBuffer = await fileObject.arrayBuffer();
-            const u8Array = new Uint8Array(arrayBuffer);
-            
-            const decoded = decoder.decodeFile(u8Array);
-            const wavBlob = waveformBlob(decoded.channelData, decoded.sampleRate);
-            const blobUrl = URL.createObjectURL(wavBlob);
-            
-            audioElement.src = blobUrl;
-            statusElement.style.display = "none"; 
-            audioElement.style.display = "block"; 
-        } catch (err) {
-            console.error("Erro ao decodificar áudio OPUS: ", err);
-            statusElement.textContent = "❌ Erro ao reproduzir este áudio.";
-        }
-    }
-
-    function waveformBlob(channelData, sampleRate) {
-        const numChannels = channelData.length;
-        const length = channelData[0].length * numChannels * 2;
-        const buffer = new ArrayBuffer(44 + length);
-        const view = new DataView(buffer);
-        
-        view.setUint32(0, 0x52494646, false); 
-        view.setUint32(4, 36 + length, true);
-        view.setUint32(8, 0x57415645, false); 
-        view.setUint32(12, 0x666d7420, false); 
-        view.setUint32(16, 16, true); 
-        view.setUint16(20, 1, true); 
-        view.setUint16(22, numChannels, true);
-        view.setUint32(24, sampleRate, true);
-        view.setUint32(28, sampleRate * numChannels * 2, true);
-        view.setUint16(32, numChannels * 2, true);
-        view.setUint16(34, 16, true); 
-        view.setUint32(36, 0x64617461, false); 
-        view.setUint32(40, length, true);
-        
-        let offset = 44;
-        for (let i = 0; i < channelData[0].length; i++) {
-            for (let channel = 0; channel < numChannels; channel++) {
-                let sample = channelData[channel][i] * 32768;
-                sample = Math.max(-32768, Math.min(32767, sample));
-                view.setInt16(offset, sample, true);
-                offset += 2;
-            }
-        }
-        return new Blob([buffer], { type: 'audio/wav' });
-    }
-
     function renderizarMensagens() {
         const container = document.getElementById('chat-container');
         container.innerHTML = "";
@@ -242,6 +165,7 @@
         let query = "";
         let offset = (currentPage - 1) * recordsPerPage;
 
+        // AJUSTE: Incluída a coluna c.ZPARTNERNAME para exibir o nome em listas gerais
         const baseQuery = `
             SELECT 
                 c.ZCONTACTJID, 
@@ -276,6 +200,7 @@
                     if (!texto && !caminhoMedia) return;
 
                     const deMim = (paraJid !== null && paraJid !== "") ? 1 : 0;
+
                     const dataUnix = (coreDataTimestamp + 978307200) * 1000;
                     const dataFormatada = new Date(dataUnix).toLocaleString('pt-BR');
                     
@@ -284,6 +209,7 @@
                     
                     let htmlConteudo = "";
                     if (currentChat === "ALL") {
+                        // AJUSTE: Exibe o nome do contato se disponível no topo da caixinha sequencial geral
                         const identificadorExibicao = (nomeContato && nomeContato.trim() !== "") ? nomeContato : contatoJid;
                         htmlConteudo += `<span class="chat-id">${identificadorExibicao}</span>`;
                     }
@@ -293,41 +219,21 @@
                     }
                     
                     if (caminhoMedia) {
-                        // CORREÇÃO: Utiliza o localizador robusto inteligente de mídias
-                        const fileObject = encontrarArquivoDeMidia(caminhoMedia);
-                        const nomeExibicaoArquivo = caminhoMedia.split('/').pop();
+                        const partes = caminhoMedia.split('/');
+                        const nomeArquivoMedia = partes[partes.length - 1].toLowerCase();
                         
-                        if (fileObject) {
-                            const nomeMinusculo = fileObject.name.toLowerCase();
-                            
-                            // Validação e renderização de Imagens
-                            if (nomeMinusculo.endsWith('.jpg') || nomeMinusculo.endsWith('.jpeg') || nomeMinusculo.endsWith('.png') || nomeMinusculo.endsWith('.webp')) {
-                                const imgUrl = URL.createObjectURL(fileObject);
-                                htmlConteudo += `<img class="media-content" src="${imgUrl}" alt="Imagem carregada">`;
-                            } 
-                            // Validação e renderização de Áudios/Mensagens de voz
-                            else if (nomeMinusculo.endsWith('.opus') || nomeMinusculo.endsWith('.aac') || nomeMinusculo.endsWith('.m4a') || nomeMinusculo.endsWith('.mp3')) {
-                                if (nomeMinusculo.endsWith('.opus')) {
-                                    const uniqueId = "audio_" + Math.random().toString(36).substr(2, 9);
-                                    htmlConteudo += `
-                                        <div class="audio-loading" id="status_${uniqueId}">🔄 Otimizando áudio do WhatsApp...</div>
-                                        <audio class="media-content" id="${uniqueId}" controls style="display:none;"></audio>
-                                    `;
-                                    setTimeout(() => {
-                                        const audEl = document.getElementById(uniqueId);
-                                        const stEl = document.getElementById(`status_${uniqueId}`);
-                                        if(audEl && stEl) carregarAudioOpus(fileObject, audEl, stEl);
-                                    }, 10);
-                                } else {
-                                    const audioUrl = URL.createObjectURL(fileObject);
-                                    htmlConteudo += `<audio class="media-content" controls src="${audioUrl}"></audio>`;
-                                }
+                        const blobUrl = mediaMap[nomeArquivoMedia];
+                        
+                        if (blobUrl) {
+                            if (nomeArquivoMedia.endsWith('.jpg') || nomeArquivoMedia.endsWith('.jpeg') || nomeArquivoMedia.endsWith('.png')) {
+                                htmlConteudo += `<img class="media-content" src="${blobUrl}" alt="Imagem">`;
+                            } else if (nomeArquivoMedia.endsWith('.opus') || nomeArquivoMedia.endsWith('.aac') || nomeArquivoMedia.endsWith('.m4a') || nomeArquivoMedia.endsWith('.mp3')) {
+                                htmlConteudo += `<audio class="media-content" controls src="${blobUrl}"></audio>`;
                             } else {
-                                htmlConteudo += `<div style="font-size:12px; margin-top:5px; color:#555;">📁 Arquivo: <strong>${nomeExibicaoArquivo}</strong></div>`;
+                                htmlConteudo += `<div style="font-size:12px; margin-top:5px; color:#555;">📁 Arquivo: <strong>${nomeArquivoMedia}</strong></div>`;
                             }
                         } else {
-                            // Fallback caso o arquivo em questão realmente falte na pasta carregada
-                            htmlConteudo += `<div style="font-size:11px; margin-top:5px; color:#c97f16; font-style:italic;">📸 [Mídia Anexada: ${nomeExibicaoArquivo}]</div>`;
+                            htmlConteudo += `<div style="font-size:11px; margin-top:5px; color:#c97f16; font-style:italic;">📸 [Mídia Anexada: ${nomeArquivoMedia}]</div>`;
                         }
                     }
                     
@@ -354,6 +260,7 @@
         return text.toString().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
     }
 
+    // Ação do botão de voltar para a página inicial
     document.getElementById('back-init-btn').addEventListener('click', function() {
         currentPage = 1;
         currentChat = "ALL";
